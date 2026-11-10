@@ -174,29 +174,17 @@ public class RCore {
             FileUtils.mkdirs(external);
             File virtualObbDir = new File(external, "Android/obb/" + packageName);
             FileUtils.mkdirs(virtualObbDir);
-            File hostObbDir = BEnvironment.getHostExternalObbDir(packageName);
-
-            // Clean any partial/truncated .obb files in virtualObbDir if hostObbDir has the full file
-            if (hostObbDir != null && hostObbDir.isDirectory() && virtualObbDir.isDirectory()) {
-                File[] vFiles = virtualObbDir.listFiles((d, name) -> name != null && name.endsWith(".obb"));
-                if (vFiles != null) {
-                    for (File vf : vFiles) {
-                        if (vf == null || !vf.isFile()) continue;
-                        File hf = new File(hostObbDir, vf.getName());
-                        if (vf.length() < 10L * 1024L * 1024L || (hf.isFile() && hf.length() > vf.length())) {
-                            vf.delete();
-                        }
-                    }
-                }
-            }
-
-            if (!hasValidObbFiles(virtualObbDir) && hasValidObbFiles(hostObbDir)) {
-                String hostObbPath = hostObbDir.getAbsolutePath();
-                rule.put(virtualObbDir.getAbsolutePath(), hostObbPath);
-                rule.put("/sdcard/Android/obb/" + packageName, hostObbPath);
-                rule.put("/storage/emulated/0/Android/obb/" + packageName, hostObbPath);
-                rule.put(String.format("/storage/emulated/%d/Android/obb/%s", systemUserId, packageName), hostObbPath);
-            }
+            // Always redirect guest OBB requests to the verified virtual game's
+            // expansion directory. Never silently redirect to another app's
+            // host OBB folder: access can be denied by Android scoped storage,
+            // and that fallback previously masked missing virtual copies.
+            String virtualObbPath = virtualObbDir.getAbsolutePath();
+            rule.put("/sdcard/Android/obb/" + packageName, virtualObbPath);
+            rule.put("/mnt/sdcard/Android/obb/" + packageName, virtualObbPath);
+            rule.put("/storage/self/primary/Android/obb/" + packageName, virtualObbPath);
+            rule.put("/storage/emulated/0/Android/obb/" + packageName, virtualObbPath);
+            rule.put(String.format("/storage/emulated/%d/Android/obb/%s",
+                    systemUserId, packageName), virtualObbPath);
             rule.put("/sdcard", external.getAbsolutePath());
             rule.put("/mnt/sdcard", external.getAbsolutePath());
             rule.put("/storage/self/primary", external.getAbsolutePath());
