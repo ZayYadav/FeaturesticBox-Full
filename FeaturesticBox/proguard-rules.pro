@@ -65,3 +65,6 @@
 # Public API consumed by FeaturesticLoader; keep original method names in release AAR.
 -keep class com.featurestic.sdk.FeaturesticBox { *; }
 -keep class com.featurestic.sdk.FeaturesticBox$SetupCallback { *; }
+
+# The loader build verifies this SDK OBB manager class exists in the release AAR.
+-keep class com.featurestic.sdk.ObbSyncManager { *; }
