@@ -350,16 +350,16 @@ public final class ObbSyncManager {
             addDirectory(paths, new File(base, "GameOBB/" + pkg));
             addDirectory(paths, new File(base, "FeaturesticBox/obb/" + pkg));
         }
-        LinkedHashMap<String, Source> detected = new LinkedHashMap<>();
+        // Preserve alternatives for the *same* filename. A first source may
+        // disappear or become unreadable while synchronization is running.
+        List<Source> discovered = new ArrayList<>();
         for (String path : paths) {
-            for (Source src : scanObbDir(new File(path), pkg)) {
-                if (!detected.containsKey(src.name)) {
-                    Log.i(TAG, "Readable OBB source found: " + path + "/" + src.name);
-                    detected.put(src.name, src);
-                }
+            for (Source candidate : scanObbDir(new File(path), pkg)) {
+                Log.i(TAG, "Candidate OBB source: " + path + "/" + candidate.name);
+                discovered.add(candidate);
             }
         }
-        return new ArrayList<>(detected.values());
+        return discovered;
     }
 
     /**
@@ -584,6 +584,18 @@ public final class ObbSyncManager {
      * file to the exact BEnvironment virtual path, and updates a hash manifest.
      * Launch must not occur until this method completes successfully.
      */
+    private static void addCandidate(Map<String, List<Source>> candidates, Source source) {
+        if (source == null) return;
+        List<Source> options = candidates.get(source.name);
+        if (options == null) {
+            options = new ArrayList<>();
+            candidates.put(source.name, options);
+        }
+        // Bound the work to avoid untrusted providers advertising thousands of
+        // duplicate candidates for the same expansion filename.
+        if (options.size() < 12) options.add(source);
+    }
+
     public static synchronized String sync(Context context, String pkg, Progress progress)
             throws IOException {
         if (context == null) throw new IOException("Missing application context");
@@ -595,18 +607,12 @@ public final class ObbSyncManager {
             throw new IOException("Virtual OBB location unavailable: " + targetDir);
         }
 
-        Map<String, Source> sources = new LinkedHashMap<>();
-        for (Source source : hostSources(app, pkg)) sources.put(source.name, source);
-        // Android's content provider can expose indexed shared Downloads even
-        // where direct File APIs cannot access the file.
-        for (Source source : mediaStoreSources(app, pkg)) {
-            if (!sources.containsKey(source.name)) sources.put(source.name, source);
-        }
-        // Manually provided matching game files are an explicit, durable fallback.
-        // Prefer readable files from the actual host game when names collide.
-        for (Source source : documentSources(app, pkg)) {
-            if (!sources.containsKey(source.name)) sources.put(source.name, source);
-        }
+        Map<String, List<Source>> sources = new LinkedHashMap<>();
+        for (Source option : hostSources(app, pkg)) addCandidate(sources, option);
+        // ContentResolver may expose indexed Downloads inaccessible by File.
+        for (Source option : mediaStoreSources(app, pkg)) addCandidate(sources, option);
+        // Persisted system picker grants are an explicit user-authorized fallback.
+        for (Source option : documentSources(app, pkg)) addCandidate(sources, option);
 
         if (sources.isEmpty()) {
             if (isReadyVerified(app, pkg)) {
@@ -617,27 +623,49 @@ public final class ObbSyncManager {
         }
 
         Properties next = new Properties();
-        int i = 0;
-        for (Source source : sources.values()) {
-            i++;
-            if (progress != null) progress.update(35 + 50 * (i - 1) / sources.size(),
-                    "Checking OBB " + i + "/" + sources.size(), source.name);
-            String inputHash = sourceHash(source);
-            File target = destination(pkg, source.name);
-            if (!target.isFile() || target.length() <= 0
-                    || (source.size > 0 && target.length() != source.size)
-                    || !inputHash.equals(fileHash(target))) {
-                if (progress != null) progress.update(35 + 50 * i / sources.size(),
-                        "Copying missing or changed OBB", source.name);
-                copyAndVerify(source, target, inputHash);
+        int checked = 0;
+        for (Map.Entry<String, List<Source>> entry : sources.entrySet()) {
+            checked++;
+            String name = entry.getKey();
+            if (progress != null) progress.update(
+                    35 + 50 * (checked - 1) / sources.size(),
+                    "Verifying OBB " + checked + "/" + sources.size(), name);
+            IOException lastError = null;
+            boolean verified = false;
+            for (Source option : entry.getValue()) {
+                try {
+                    String expected = sourceHash(option);
+                    File target = destination(pkg, name);
+                    if (!target.isFile() || target.length() <= 0
+                            || (option.size > 0 && target.length() != option.size)
+                            || !expected.equals(fileHash(target))) {
+                        if (progress != null) progress.update(
+                                35 + 50 * checked / sources.size(),
+                                "Copying game expansion file", name);
+                        copyAndVerify(option, target, expected);
+                    }
+                    if (target.length() <= 0
+                            || (option.size > 0 && target.length() != option.size)) {
+                        throw new IOException("OBB size validation failed for " + name);
+                    }
+                    next.setProperty("obb." + name, target.length() + ":" + expected);
+                    verified = true;
+                    break;
+                } catch (IOException | SecurityException denied) {
+                    Log.w(TAG, "OBB source failed, checking next authorized source: " + name, denied);
+                    lastError = new IOException("OBB candidate inaccessible: " + name, denied);
+                }
             }
-            // copyAndVerify already hashes the staged file after replacement,
-            // or the unchanged target's SHA-256 was checked above. Do not
-            // re-read multi-gigabyte expansion files unnecessarily.
-            if (target.length() <= 0 || (source.size > 0 && target.length() != source.size)) {
-                throw new IOException("OBB not valid in virtual game path: " + target);
+            if (!verified) {
+                // Do not launch with a partial or unverified copy. The existing
+                // validated inventory may be used only if its hashes still match.
+                if (isReadyVerified(app, pkg)) {
+                    return "Existing virtual OBB verified after source failures: "
+                            + targetDir.getAbsolutePath();
+                }
+                throw new IOException("All accessible OBB candidates failed for " + name
+                        + ". " + NEED_SOURCE, lastError);
             }
-            next.setProperty("obb." + source.name, target.length() + ":" + inputHash);
         }
 
         writeManifest(app, pkg, next);
