@@ -593,7 +593,7 @@ public final class ObbSyncManager {
         }
         // Bound the work to avoid untrusted providers advertising thousands of
         // duplicate candidates for the same expansion filename.
-        if (options.size() < 12) options.add(source);
+        if (options.size() < 32) options.add(source);
     }
 
     public static synchronized String sync(Context context, String pkg, Progress progress)
@@ -609,10 +609,11 @@ public final class ObbSyncManager {
 
         Map<String, List<Source>> sources = new LinkedHashMap<>();
         for (Source option : hostSources(app, pkg)) addCandidate(sources, option);
+        // Persistent, explicitly user-selected grants take priority over
+        // possible stale MediaStore index results for the same OBB filename.
+        for (Source option : documentSources(app, pkg)) addCandidate(sources, option);
         // ContentResolver may expose indexed Downloads inaccessible by File.
         for (Source option : mediaStoreSources(app, pkg)) addCandidate(sources, option);
-        // Persisted system picker grants are an explicit user-authorized fallback.
-        for (Source option : documentSources(app, pkg)) addCandidate(sources, option);
 
         if (sources.isEmpty()) {
             if (isReadyVerified(app, pkg)) {
