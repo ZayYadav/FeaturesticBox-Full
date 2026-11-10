@@ -61,3 +61,7 @@
 -keep class f.b.** { *; }
 -keep class org.lsposed.lsparanoid.** { *; }
 -dontwarn org.lsposed.lsparanoid.**
+
+# Public API consumed by FeaturesticLoader; keep original method names in release AAR.
+-keep class com.featurestic.sdk.FeaturesticBox { *; }
+-keep class com.featurestic.sdk.FeaturesticBox$SetupCallback { *; }
