@@ -54,7 +54,7 @@ public final class CrashShieldAndResourceHealer {
         });
     }
 
-    private static boolean shouldAbsorbNonFatalException(Thread thread, Throwable t) {
+    public static boolean shouldAbsorbNonFatalException(Thread thread, Throwable t) {
         if (t == null) {
             return true;
         }
