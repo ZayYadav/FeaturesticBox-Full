@@ -79,7 +79,14 @@ public final class ObbSyncManager {
     }
 
     private static File destination(String pkg, String filename) {
-        return new File(BEnvironment.getExternalObbDir(pkg), filename);
+        File target = new File(BEnvironment.getExternalObbDir(pkg), filename);
+        File backup = new File(target.getParentFile(), filename + ".backup");
+        if (!target.exists() && backup.isFile()) {
+            if (!backup.renameTo(target)) {
+                Log.w(TAG, "Unable to restore previous expansion file: " + backup);
+            }
+        }
+        return target;
     }
 
     private static Properties readManifest(Context context, String pkg) {
@@ -373,12 +380,29 @@ public final class ObbSyncManager {
                     || !expectedSha.equals(toHex(sha.digest()))) {
                 throw new IOException("OBB copy checksum or length mismatch: " + source.name);
             }
-            // Keep the old file intact until the new file is completely verified.
+            // Preserve the last known-good file if the destination filesystem
+            // refuses rename-over-existing, or verification later fails.
+            File backup = new File(dir, target.getName() + ".backup");
+            boolean hadOld = target.exists();
+            if (hadOld) {
+                if (backup.exists() && !backup.delete()) {
+                    throw new IOException("Cannot clear old OBB backup: " + backup);
+                }
+                if (!target.renameTo(backup)) {
+                    throw new IOException("Cannot back up old virtual OBB: " + target);
+                }
+            }
             if (!tmp.renameTo(target)) {
+                if (hadOld) backup.renameTo(target);
                 throw new IOException("Could not activate new virtual OBB: " + source.name);
             }
             if (target.length() != copied || !expectedSha.equals(fileHash(target))) {
+                target.delete();
+                if (hadOld) backup.renameTo(target);
                 throw new IOException("OBB verification after copy failed: " + source.name);
+            }
+            if (hadOld && backup.exists() && !backup.delete()) {
+                Log.w(TAG, "Old OBB backup could not be removed: " + backup);
             }
         } finally {
             if (tmp.exists()) tmp.delete();
