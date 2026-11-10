@@ -96,12 +96,6 @@ void SystemPropertiesHook::init(JNIEnv *env) {
         (void **) (&orig_native_get),
         true
     );
-    void *libcHandle = xdl_open("libc.so", XDL_DEFAULT);
-    if (libcHandle != nullptr) {
-        void *sym = xdl_sym(libcHandle, "__system_property_get", nullptr);
-        if (sym != nullptr) {
-            MSHookFunction(sym, (void *) new___system_property_get, (void **) &orig___system_property_get);
-        }
-        xdl_close(libcHandle);
-    }
+    // Do not call MSHookFunction: this project does not link Cydia Substrate.
+    // The JNI hook above remains; unsupported libc hooking must not break the SDK build.
 }
