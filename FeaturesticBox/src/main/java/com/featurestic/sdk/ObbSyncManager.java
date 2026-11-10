@@ -432,14 +432,17 @@ public final class ObbSyncManager {
                         "Copying missing or changed OBB", source.name);
                 copyAndVerify(source, target, inputHash);
             }
-            if (target.length() <= 0 || !inputHash.equals(fileHash(target))) {
+            // copyAndVerify already hashes the staged file after replacement,
+            // or the unchanged target's SHA-256 was checked above. Do not
+            // re-read multi-gigabyte expansion files unnecessarily.
+            if (target.length() <= 0 || (source.size > 0 && target.length() != source.size)) {
                 throw new IOException("OBB not valid in virtual game path: " + target);
             }
             next.setProperty("obb." + source.name, target.length() + ":" + inputHash);
         }
 
         writeManifest(app, pkg, next);
-        if (!isReadyVerified(app, pkg)) {
+        if (!isReadyQuick(app, pkg)) {
             throw new IOException("Virtual OBB manifest verification failed after sync");
         }
         if (progress != null) progress.update(95, "OBB verified", targetDir.getAbsolutePath());
