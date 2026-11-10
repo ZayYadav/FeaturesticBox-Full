@@ -1,0 +1,63 @@
+# Add project specific ProGuard rules here.
+# You can control the set of applied configuration files using the
+# proguardFiles setting in build.gradle.
+#
+# For more details, see
+#   http://developer.android.com/guide/developing/tools/proguard.html
+
+# If your project uses WebView with JS, uncomment the following
+# and specify the fully qualified class name to the JavaScript interface
+# class:
+#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
+#   public *;
+#}
+
+# Uncomment this to preserve the line number information for
+# debugging stack traces.
+#-keepattributes SourceFile,LineNumberTable
+
+# If you keep the line number information, uncomment this to
+# hide the original source file name.
+-renamesourcefileattribute FeaturesticGuard
+-repackageclasses 'f.b'
+-allowaccessmodification
+
+-keep class com.featurestic.box.core.system.api.MetaActivationManager { *; }
+-keep class net_62v.external.** { *; }
+-keep class com.featurestic.box.** {*; }
+-keep class top.niunaijun.jnihook.** {*; }
+-keep class black.** {*; }
+-keep class android.** {*; }
+-keep class com.android.** {*; }
+
+# Keep the FeaturesticBoxCore class and all its methods
+-keep class com.featurestic.box.FeaturesticBoxCore {
+    *;
+}
+
+# Keep native methods so they aren't removed or renamed
+-keepclassmembers class com.featurestic.box.FeaturesticBoxCore {
+    public native *;
+}
+
+# Prevent BthreadMain and other sensitive methods from being renamed
+-keepclassmembers class com.featurestic.box.FeaturesticBoxCore {
+    
+    
+    public boolean BthreadMain();
+    public boolean launchApk(java.lang.String, int);
+    public boolean installPackageAsUser(java.lang.String, int);
+}
+
+-dontwarn okhttp3.**
+-dontwarn okio.**
+-keep class okhttp3.** { *; }
+-keep class okio.** { *; }
+
+
+-keep class com.featurestic.box.** { *; }
+-keep class com.featurestic.box.FeaturesticBoxCore { *; }
+
+-keep class f.b.** { *; }
+-keep class org.lsposed.lsparanoid.** { *; }
+-dontwarn org.lsposed.lsparanoid.**

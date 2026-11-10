@@ -1,0 +1,7 @@
+# Protect SQLite database and internal PHP libraries from direct web access
+<FilesMatch "\.(sqlite|db|sql)$">
+    Require all denied
+</FilesMatch>
+<FilesMatch "^(config|db|crypto)\.php$">
+    Require all denied
+</FilesMatch>
