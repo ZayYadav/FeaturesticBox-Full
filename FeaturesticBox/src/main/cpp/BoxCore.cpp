@@ -393,6 +393,7 @@ static void anogsMemoryFaultHandler(int sig, siginfo_t *info, void *ucontext) {
             sCrashReportWrittenForPc = true;
             recordNativeCrashOffsetLog(sig, info->si_code, pcAddr, faultAddr, sRepeatFaultCount);
         }
+#if defined(__aarch64__) || defined(__arm__)
         if (uc != nullptr && sRepeatFaultCount <= 16) {
 #if defined(__aarch64__)
             uc->uc_mcontext.pc += 4;
@@ -408,6 +409,7 @@ static void anogsMemoryFaultHandler(int sig, siginfo_t *info, void *ucontext) {
             return;
 #endif
         }
+#endif // ARM-only ucontext handling
     }
 
     // Chain all other signals (including ART Java implicit null checks and GC suspend checks)
