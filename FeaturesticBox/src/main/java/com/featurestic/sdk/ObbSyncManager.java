@@ -338,6 +338,10 @@ public final class ObbSyncManager {
         for (String root : roots) {
             File base = new File(root);
             addDirectory(paths, new File(base, "Android/obb/" + pkg));
+            // Migration route: older Loader builds kept guest expansion files
+            // under a top-level SdCard directory. Treat that as an accessible
+            // source when moving to the app-owned virtual storage root.
+            addDirectory(paths, new File(base, "SdCard/Android/obb/" + pkg));
             addDirectory(paths, new File(base, "Download"));
             addDirectory(paths, new File(base, "Download/" + pkg));
             addDirectory(paths, new File(base, "Downloads"));
