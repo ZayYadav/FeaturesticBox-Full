@@ -280,7 +280,9 @@ public final class ThermalAndFrameGuard {
             System.gc();
             if (ctx != null) {
                 // ComponentCallbacks2.TRIM_MEMORY_RUNNING_CRITICAL = 15
-                ctx.onTrimMemory(15);
+                if (ctx instanceof android.content.ComponentCallbacks2) {
+                    ((android.content.ComponentCallbacks2) ctx).onTrimMemory(15);
+                }
             }
         } catch (Throwable ignored) {
         }
