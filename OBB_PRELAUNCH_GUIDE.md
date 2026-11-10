@@ -40,14 +40,25 @@ performs full hash verification.
 
 ## Expected path
 
-The virtual folder is determined by \`BEnvironment.getExternalObbDir(pkg)\`:
-usually \`/storage/emulated/0/SdCard/Android/obb/<pkg>\`, or the Android-managed
-\`<loader-external-files>/SdCard/Android/obb/<pkg>\` fallback when shared storage
-cannot be written. \`RCore\` maps guest \`/sdcard/Android/obb/<pkg>\` and
-\`/storage/emulated/0/Android/obb/<pkg>\` to this **same** virtual directory.
+The virtual folder is determined by `BEnvironment.getExternalObbDir(pkg)`.
+On a writable external volume it now **prefers the Loader's app-owned**
+`<loader-external-files>/SdCard/Android/obb/<pkg>`, obtained through
+`Context.getExternalFilesDir("SdCard")`. If that API is unavailable, it can
+try the legacy shared `/storage/emulated/0/SdCard/Android/obb/<pkg>`.
 
-The real host folder is **never** used as a guest-path fallback. This removes
-false “success” when the guest could not access the original OBB.
+`RCore` maps guest `/sdcard/Android/obb/<pkg>` and
+`/storage/emulated/0/Android/obb/<pkg>` to this **same** virtual folder.
+Previously copied expansion files in the legacy shared `SdCard` directory are
+probed as migration candidates.
+
+Automatic candidates, all subject to Android access controls: host
+`Android/obb/<pkg>`, own OBB directories (`Context.getObbDirs()`), own external
+files directories, storage roots discovered by `StorageManager.getStorageVolumes()`,
+readable Download(s), Documents, OBB and GameOBB folders, MediaStore indexed
+Download files and previously saved user-authorized `ACTION_OPEN_DOCUMENT`
+URIs. If one candidate fails, another readable source is tried.
+
+No root, device-owner permission, shell trick or access-control bypass is used.
 
 ## Android 11+ limitation
 

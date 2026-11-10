@@ -153,30 +153,37 @@ public class BEnvironment {
         return new File(getAppDir(packageName), "package.conf");
     }
 
+    /**
+     * Use an app-owned Android external-files directory for the guest SD card.
+     * Direct /storage/emulated/0/SdCard writes are not uniformly permitted on
+     * recent Android versions, even when the directory exists.
+     *
+     * RCore redirects guest /sdcard to exactly this virtual root. Prefer the
+     * stable Context API over a guessed or device-specific shared-storage path.
+     */
     public static File getExternalStorageDirectory() {
-        File root = sExternalVBoxRoot != null ? sExternalVBoxRoot : resolveRealExternalStorageRoot();
-        File legacySdCard = new File(root, "SdCard");
-        try {
-            if (legacySdCard.isDirectory() && legacySdCard.canWrite()) {
-                return legacySdCard;
-            }
-            if (legacySdCard.mkdirs() && legacySdCard.canWrite()) {
-                return legacySdCard;
-            }
-        } catch (Throwable ignored) {
-        }
         try {
             Context ctx = FeaturesticBoxCore.getContext();
             if (ctx != null) {
-                File appExt = ctx.getExternalFilesDir("SdCard");
-                if (appExt != null) {
-                    FileUtils.mkdirs(appExt);
-                    return appExt;
+                File owned = ctx.getExternalFilesDir("SdCard");
+                if (owned != null
+                        && (owned.isDirectory() || owned.mkdirs())
+                        && owned.canWrite()) {
+                    return owned;
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable failure) {
+            android.util.Log.w("FeaturesticStorage",
+                    "App-owned virtual storage unavailable", failure);
         }
-        return legacySdCard;
+        File root = sExternalVBoxRoot != null ? sExternalVBoxRoot : resolveRealExternalStorageRoot();
+        File legacy = new File(root, "SdCard");
+        if ((legacy.isDirectory() || legacy.mkdirs()) && legacy.canWrite()) {
+            return legacy;
+        }
+        // Let the caller explicitly detect and report failed writes; never
+        // claim that an inaccessible directory is a writable target.
+        return legacy;
     }
 
     public static File getHostExternalDataDir(String packageName) {
@@ -196,7 +203,8 @@ public class BEnvironment {
     }
 
     public static File getExternalObbDir(String packageName) {
-        stabilizeHostActivityTextViewsForBackgroundSetText();
+        // Filesystem lookup must be side-effect free: do not post UI callbacks
+        // or await the main thread during a multi-gigabyte OBB copy.
         File dir = new File(getExternalStorageDirectory(), String.format(Locale.CHINA, "Android/obb/%s/", packageName));
         FileUtils.mkdirs(dir);
         return dir;

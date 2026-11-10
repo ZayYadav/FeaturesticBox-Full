@@ -1,12 +1,18 @@
 package com.featurestic.sdk;
 
 import android.content.ContentResolver;
+import android.content.ContentUris;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
+import android.os.storage.StorageManager;
+import android.os.storage.StorageVolume;
 import android.provider.OpenableColumns;
+import android.provider.MediaStore;
 import android.util.Log;
 
 import com.featurestic.box.core.env.BEnvironment;
@@ -22,6 +28,7 @@ import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -212,8 +219,9 @@ public final class ObbSyncManager {
     public static boolean hasReadableHostObb(String pkg) {
         try {
             assertPackage(pkg);
-            return !hostSources(pkg).isEmpty();
-        } catch (IOException e) {
+            File dir = BEnvironment.getHostExternalObbDir(pkg);
+            return dir != null && scanObbDir(dir, pkg).size() > 0;
+        } catch (Throwable ignored) {
             return false;
         }
     }
@@ -233,16 +241,182 @@ public final class ObbSyncManager {
         }
     }
 
-    private static List<Source> hostSources(String pkg) {
-        File dir = BEnvironment.getHostExternalObbDir(pkg);
-        File[] files = dir.listFiles();
+    private static List<Source> scanObbDir(File dir, String pkg) {
+        if (dir == null || !dir.isDirectory()) return Collections.emptyList();
+        final File[] files;
+        try {
+            files = dir.listFiles();
+        } catch (SecurityException blocked) {
+            return Collections.emptyList();
+        }
         if (files == null) return Collections.emptyList();
-        List<Source> result = new ArrayList<>();
+        List<Source> matches = new ArrayList<>();
         for (final File file : files) {
-            if (file.isFile() && file.canRead() && file.length() > 0
-                    && validName(file.getName(), pkg)) {
-                result.add(new Source(file.getName(), file.length(),
+            try {
+                if (!validName(file.getName(), pkg) || !file.isFile() || file.length() <= 0) continue;
+                // isReadable/canRead alone does not prove Android FUSE lets a stream open.
+                try (InputStream probe = new FileInputStream(file)) {
+                    if (probe.read() < 0) continue;
+                }
+                matches.add(new Source(file.getName(), file.length(),
                         () -> new FileInputStream(file)));
+            } catch (IOException | SecurityException e) {
+                Log.d(TAG, "OBB source not readable in " + dir, e);
+            }
+        }
+        return matches;
+    }
+
+    private static void addDirectory(LinkedHashSet<String> directories, File candidate) {
+        if (candidate == null) return;
+        try {
+            directories.add(candidate.getCanonicalPath());
+        } catch (IOException | SecurityException e) {
+            directories.add(candidate.getAbsolutePath());
+        }
+    }
+
+    /**
+     * Candidate paths are sourced from documented Android storage APIs, not
+     * a magic permission or a bypass. Every candidate is probed for readability.
+     * The host path has first priority; following paths are user-owned exports,
+     * app-specific staging, and removable-storage volumes.
+     */
+    private static List<Source> hostSources(Context context, String pkg) {
+        LinkedHashSet<String> paths = new LinkedHashSet<>();
+        addDirectory(paths, BEnvironment.getHostExternalObbDir(pkg));
+
+        LinkedHashSet<String> roots = new LinkedHashSet<>();
+        try {
+            addDirectory(roots, Environment.getExternalStorageDirectory());
+        } catch (SecurityException ignored) {}
+
+        if (context != null) {
+            try {
+                File[] ownDirs = context.getObbDirs();
+                if (ownDirs != null) {
+                    for (File own : ownDirs) {
+                        addDirectory(paths, own); // our app's own OBB area is accessible
+                        addDirectory(paths, own == null ? null : new File(own, pkg));
+                    }
+                }
+                File[] extDirs = context.getExternalFilesDirs(null);
+                if (extDirs != null) {
+                    for (File dir : extDirs) {
+                        if (dir == null) continue;
+                        addDirectory(paths, new File(dir, "obb"));
+                        addDirectory(paths, new File(dir, "obb/" + pkg));
+                        addDirectory(paths, new File(dir, pkg));
+                        String full = dir.getAbsolutePath();
+                        int cut = full.indexOf("/Android/data/");
+                        if (cut > 0) addDirectory(roots, new File(full.substring(0, cut)));
+                    }
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "External-files directory discovery unavailable", e);
+            }
+
+            // Framework storage volumes include additional SD cards and USB media.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    StorageManager manager = (StorageManager)
+                            context.getSystemService(Context.STORAGE_SERVICE);
+                    if (manager != null) {
+                        for (StorageVolume volume : manager.getStorageVolumes()) {
+                            File root = volume.getDirectory();
+                            if (root != null) addDirectory(roots, root);
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.d(TAG, "StorageManager volume discovery unavailable", e);
+                }
+            }
+            addDirectory(paths, new File(context.getFilesDir(), "obb/" + pkg));
+            addDirectory(paths, new File(context.getFilesDir(), "obb"));
+        }
+
+        for (String root : roots) {
+            File base = new File(root);
+            addDirectory(paths, new File(base, "Android/obb/" + pkg));
+            // Migration route: older Loader builds kept guest expansion files
+            // under a top-level SdCard directory. Treat that as an accessible
+            // source when moving to the app-owned virtual storage root.
+            addDirectory(paths, new File(base, "SdCard/Android/obb/" + pkg));
+            addDirectory(paths, new File(base, "Download"));
+            addDirectory(paths, new File(base, "Download/" + pkg));
+            addDirectory(paths, new File(base, "Downloads"));
+            addDirectory(paths, new File(base, "Downloads/" + pkg));
+            addDirectory(paths, new File(base, "Documents"));
+            addDirectory(paths, new File(base, "Documents/" + pkg));
+            addDirectory(paths, new File(base, "OBB"));
+            addDirectory(paths, new File(base, "OBB/" + pkg));
+            addDirectory(paths, new File(base, "GameOBB"));
+            addDirectory(paths, new File(base, "GameOBB/" + pkg));
+            addDirectory(paths, new File(base, "FeaturesticBox/obb/" + pkg));
+        }
+        // Preserve alternatives for the *same* filename. A first source may
+        // disappear or become unreadable while synchronization is running.
+        List<Source> discovered = new ArrayList<>();
+        for (String path : paths) {
+            for (Source candidate : scanObbDir(new File(path), pkg)) {
+                Log.i(TAG, "Candidate OBB source: " + path + "/" + candidate.name);
+                discovered.add(candidate);
+            }
+        }
+        return discovered;
+    }
+
+    /**
+     * MediaStore is another framework-mediated route for indexed downloads
+     * that the calling application is authorized to read. OEM providers can
+     * decline these queries; that is a normal fallback miss, not a bypass.
+     */
+    private static List<Source> mediaStoreSources(Context context, String pkg) {
+        if (context == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            return Collections.emptyList();
+        }
+        final ContentResolver resolver = context.getContentResolver();
+        final String[] projection = {
+                MediaStore.MediaColumns._ID,
+                MediaStore.MediaColumns.DISPLAY_NAME,
+                MediaStore.MediaColumns.SIZE
+        };
+        List<Source> result = new ArrayList<>();
+        Uri[] collections = {
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                MediaStore.Files.getContentUri("external")
+        };
+        LinkedHashSet<String> collectedUris = new LinkedHashSet<>();
+        for (Uri collection : collections) {
+            try (Cursor cursor = resolver.query(collection, projection,
+                    MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
+                    new String[]{"%." + pkg + ".obb"}, null)) {
+                if (cursor == null) continue;
+                int idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
+                int nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
+                int sizeCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.SIZE);
+                int examined = 0;
+                while (cursor.moveToNext() && examined++ < 64) {
+                    final String name = cursor.getString(nameCol);
+                    if (!validName(name, pkg)) continue;
+                    final long size = cursor.isNull(sizeCol) ? -1L : cursor.getLong(sizeCol);
+                    if (size == 0) continue;
+                    final Uri contentUri = ContentUris.withAppendedId(
+                            collection, cursor.getLong(idCol));
+                    if (!collectedUris.add(contentUri.toString())) continue;
+                    try (InputStream sample = resolver.openInputStream(contentUri)) {
+                        if (sample == null || sample.read() < 0) continue;
+                    } catch (IOException | SecurityException cannotAccess) {
+                        continue;
+                    }
+                    result.add(new Source(name, size, () -> {
+                        InputStream in = resolver.openInputStream(contentUri);
+                        if (in == null) throw new IOException("OBB MediaStore source unavailable");
+                        return in;
+                    }));
+                }
+            } catch (Exception e) {
+                Log.d(TAG, "MediaStore OBB lookup not permitted for " + collection, e);
             }
         }
         return result;
@@ -414,6 +588,18 @@ public final class ObbSyncManager {
      * file to the exact BEnvironment virtual path, and updates a hash manifest.
      * Launch must not occur until this method completes successfully.
      */
+    private static void addCandidate(Map<String, List<Source>> candidates, Source source) {
+        if (source == null) return;
+        List<Source> options = candidates.get(source.name);
+        if (options == null) {
+            options = new ArrayList<>();
+            candidates.put(source.name, options);
+        }
+        // Bound the work to avoid untrusted providers advertising thousands of
+        // duplicate candidates for the same expansion filename.
+        if (options.size() < 32) options.add(source);
+    }
+
     public static synchronized String sync(Context context, String pkg, Progress progress)
             throws IOException {
         if (context == null) throw new IOException("Missing application context");
@@ -425,13 +611,13 @@ public final class ObbSyncManager {
             throw new IOException("Virtual OBB location unavailable: " + targetDir);
         }
 
-        Map<String, Source> sources = new LinkedHashMap<>();
-        for (Source source : hostSources(pkg)) sources.put(source.name, source);
-        // Manually provided matching game files are an explicit, durable fallback.
-        // Prefer readable files from the actual host game when names collide.
-        for (Source source : documentSources(app, pkg)) {
-            if (!sources.containsKey(source.name)) sources.put(source.name, source);
-        }
+        Map<String, List<Source>> sources = new LinkedHashMap<>();
+        for (Source option : hostSources(app, pkg)) addCandidate(sources, option);
+        // Persistent, explicitly user-selected grants take priority over
+        // possible stale MediaStore index results for the same OBB filename.
+        for (Source option : documentSources(app, pkg)) addCandidate(sources, option);
+        // ContentResolver may expose indexed Downloads inaccessible by File.
+        for (Source option : mediaStoreSources(app, pkg)) addCandidate(sources, option);
 
         if (sources.isEmpty()) {
             if (isReadyVerified(app, pkg)) {
@@ -442,27 +628,49 @@ public final class ObbSyncManager {
         }
 
         Properties next = new Properties();
-        int i = 0;
-        for (Source source : sources.values()) {
-            i++;
-            if (progress != null) progress.update(35 + 50 * (i - 1) / sources.size(),
-                    "Checking OBB " + i + "/" + sources.size(), source.name);
-            String inputHash = sourceHash(source);
-            File target = destination(pkg, source.name);
-            if (!target.isFile() || target.length() <= 0
-                    || (source.size > 0 && target.length() != source.size)
-                    || !inputHash.equals(fileHash(target))) {
-                if (progress != null) progress.update(35 + 50 * i / sources.size(),
-                        "Copying missing or changed OBB", source.name);
-                copyAndVerify(source, target, inputHash);
+        int checked = 0;
+        for (Map.Entry<String, List<Source>> entry : sources.entrySet()) {
+            checked++;
+            String name = entry.getKey();
+            if (progress != null) progress.update(
+                    35 + 50 * (checked - 1) / sources.size(),
+                    "Verifying OBB " + checked + "/" + sources.size(), name);
+            IOException lastError = null;
+            boolean verified = false;
+            for (Source option : entry.getValue()) {
+                try {
+                    String expected = sourceHash(option);
+                    File target = destination(pkg, name);
+                    if (!target.isFile() || target.length() <= 0
+                            || (option.size > 0 && target.length() != option.size)
+                            || !expected.equals(fileHash(target))) {
+                        if (progress != null) progress.update(
+                                35 + 50 * checked / sources.size(),
+                                "Copying game expansion file", name);
+                        copyAndVerify(option, target, expected);
+                    }
+                    if (target.length() <= 0
+                            || (option.size > 0 && target.length() != option.size)) {
+                        throw new IOException("OBB size validation failed for " + name);
+                    }
+                    next.setProperty("obb." + name, target.length() + ":" + expected);
+                    verified = true;
+                    break;
+                } catch (IOException | SecurityException denied) {
+                    Log.w(TAG, "OBB source failed, checking next authorized source: " + name, denied);
+                    lastError = new IOException("OBB candidate inaccessible: " + name, denied);
+                }
             }
-            // copyAndVerify already hashes the staged file after replacement,
-            // or the unchanged target's SHA-256 was checked above. Do not
-            // re-read multi-gigabyte expansion files unnecessarily.
-            if (target.length() <= 0 || (source.size > 0 && target.length() != source.size)) {
-                throw new IOException("OBB not valid in virtual game path: " + target);
+            if (!verified) {
+                // Do not launch with a partial or unverified copy. The existing
+                // validated inventory may be used only if its hashes still match.
+                if (isReadyVerified(app, pkg)) {
+                    return "Existing virtual OBB verified after source failures: "
+                            + targetDir.getAbsolutePath();
+                }
+                throw new IOException("All accessible OBB candidates failed for " + name
+                        + ". " + NEED_SOURCE, lastError);
             }
-            next.setProperty("obb." + source.name, target.length() + ":" + inputHash);
         }
 
         writeManifest(app, pkg, next);
