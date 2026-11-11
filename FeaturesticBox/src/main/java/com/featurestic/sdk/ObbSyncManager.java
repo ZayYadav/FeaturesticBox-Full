@@ -67,18 +67,25 @@ public final class ObbSyncManager {
     }
 
     /**
-     * Android expansion APK standard: main.VERSION.PACKAGE.obb / patch.VERSION.PACKAGE.obb.
-     * Prevents accidentally importing an unrelated game's OBB.
+     * Accept any safe .obb filename within a game-scoped folder or an explicitly
+     * user-selected URI. Not every game uses the main.VERSION.PACKAGE.obb form.
+     * Discovery in shared folders remains package-filtered to avoid copying
+     * another title's unrelated expansion files into this game.
      */
     private static boolean validName(String name, String pkg) {
-        if (name == null || pkg == null || name.contains("/") || name.contains("\\")
-                || name.contains("..") || name.length() > 220) {
-            return false;
-        }
-        String suffix = "." + pkg + ".obb";
-        if (!name.endsWith(suffix)) return false;
-        String prefix = name.substring(0, name.length() - suffix.length());
-        return prefix.matches("(main|patch)\\.[0-9]+");
+        return name != null && pkg != null && name.length() > 4 && name.length() <= 220
+                && !name.contains("/") && !name.contains("\\") && !name.contains("..")
+                && name.toLowerCase(Locale.US).endsWith(".obb");
+    }
+
+    private static boolean isNamedForGame(String name, String pkg) {
+        if (!validName(name, pkg)) return false;
+        String lower = name.toLowerCase(Locale.US);
+        String game = pkg.toLowerCase(Locale.US);
+        return lower.endsWith("." + game + ".obb")
+                || lower.equals(game + ".obb")
+                || lower.startsWith(game + "_")
+                || lower.startsWith(game + "-");
     }
 
     private static File manifestFile(Context context, String pkg) {
@@ -262,9 +269,15 @@ public final class ObbSyncManager {
         }
         if (files == null) return Collections.emptyList();
         List<Source> matches = new ArrayList<>();
+        // Inside Android/obb/<game.pkg> or an explicit export/<game.pkg>
+        // any .obb belongs to the selected game. Shared Download/Documents
+        // locations require a package-labelled filename.
+        boolean gameDirectory = pkg.equalsIgnoreCase(dir.getName());
         for (final File file : files) {
             try {
-                if (!validName(file.getName(), pkg) || !file.isFile() || file.length() <= 0) continue;
+                String name = file.getName();
+                if (!validName(name, pkg) || (!gameDirectory && !isNamedForGame(name, pkg))
+                        || !file.isFile() || file.length() <= 0) continue;
                 // isReadable/canRead alone does not prove Android FUSE lets a stream open.
                 try (InputStream probe = new FileInputStream(file)) {
                     if (probe.read() < 0) continue;
@@ -344,6 +357,10 @@ public final class ObbSyncManager {
             }
             addDirectory(paths, new File(context.getFilesDir(), "obb/" + pkg));
             addDirectory(paths, new File(context.getFilesDir(), "obb"));
+            File ownObbImports = context.getExternalFilesDir("OBBImport");
+            if (ownObbImports != null) {
+                addDirectory(paths, new File(ownObbImports, pkg));
+            }
         }
 
         for (String root : roots) {
@@ -353,6 +370,7 @@ public final class ObbSyncManager {
             // under a top-level SdCard directory. Treat that as an accessible
             // source when moving to the app-owned virtual storage root.
             addDirectory(paths, new File(base, "SdCard/Android/obb/" + pkg));
+            addDirectory(paths, new File(base, "Sdcard/Android/obb/" + pkg));
             addDirectory(paths, new File(base, "Download"));
             addDirectory(paths, new File(base, "Download/" + pkg));
             addDirectory(paths, new File(base, "Downloads"));
@@ -401,7 +419,7 @@ public final class ObbSyncManager {
         for (Uri collection : collections) {
             try (Cursor cursor = resolver.query(collection, projection,
                     MediaStore.MediaColumns.DISPLAY_NAME + " LIKE ?",
-                    new String[]{"%." + pkg + ".obb"}, null)) {
+                    new String[]{"%.obb"}, null)) {
                 if (cursor == null) continue;
                 int idCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns._ID);
                 int nameCol = cursor.getColumnIndexOrThrow(MediaStore.MediaColumns.DISPLAY_NAME);
@@ -409,7 +427,7 @@ public final class ObbSyncManager {
                 int examined = 0;
                 while (cursor.moveToNext() && examined++ < 64) {
                     final String name = cursor.getString(nameCol);
-                    if (!validName(name, pkg)) continue;
+                    if (!isNamedForGame(name, pkg)) continue;
                     final long size = cursor.isNull(sizeCol) ? -1L : cursor.getLong(sizeCol);
                     if (size == 0) continue;
                     final Uri contentUri = ContentUris.withAppendedId(
@@ -442,6 +460,13 @@ public final class ObbSyncManager {
             }
         } catch (Exception e) {
             Log.w(TAG, "Could not read document display name", e);
+        }
+        // Some third-party file managers only expose their filename in the URI.
+        String last = uri != null ? uri.getLastPathSegment() : null;
+        if (last != null) {
+            int slash = Math.max(last.lastIndexOf('/'), last.lastIndexOf(':'));
+            String candidate = last.substring(slash + 1);
+            if (candidate.toLowerCase(Locale.US).endsWith(".obb")) return candidate;
         }
         return null;
     }
@@ -493,6 +518,64 @@ public final class ObbSyncManager {
         if (selected.isEmpty()) throw new IOException("No valid game OBB documents");
         preferences.edit().putStringSet("uris_" + pkg, selected).apply();
         return added;
+    }
+
+    /**
+     * Copy files shared by a file manager using temporary ACTION_SEND grants,
+     * or files returned by ACTION_OPEN_DOCUMENT. No persistent grant is required:
+     * we stream the selected bytes while the receiving activity owns the URI.
+     * MUST be called on a worker thread.
+     */
+    public static synchronized String importGrantedObbs(Context context, String pkg,
+            List<Uri> documents, Progress progress) throws IOException {
+        if (context == null || documents == null || documents.isEmpty()) {
+            throw new IOException("No shared OBB files were provided");
+        }
+        assertPackage(pkg);
+        Context app = context.getApplicationContext();
+        if (app == null) app = context;
+        File dir = BEnvironment.getExternalObbDir(pkg);
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            throw new IOException("Virtual OBB destination is not available");
+        }
+        // Preserve earlier verified main/patch OBBs when importing one more file.
+        Properties manifest = isReadyVerified(app, pkg) ? readManifest(app, pkg)
+                : new Properties();
+        int imported = 0;
+        int seen = 0;
+        for (Uri uri : documents) {
+            if (uri == null || !"content".equals(uri.getScheme())) continue;
+            String name = documentName(context, uri);
+            if (!validName(name, pkg)) {
+                throw new IOException("Selected document must have a safe .obb filename: " + name);
+            }
+            final ContentResolver resolver = context.getContentResolver();
+            Source source = new Source(name, documentSize(context, uri), () -> {
+                InputStream input = resolver.openInputStream(uri);
+                if (input == null) throw new IOException("Cannot read shared file: " + name);
+                return input;
+            });
+            if (progress != null) progress.update(20, "Reading shared expansion file", name);
+            String sha = sourceHash(source);
+            File target = destination(pkg, name);
+            if (!target.isFile() || isSymbolicLink(target) || target.length() <= 0
+                    || (source.size > 0 && target.length() != source.size)
+                    || !sha.equals(fileHash(target))) {
+                if (progress != null) progress.update(45, "Copying OBB into virtual game", name);
+                copyAndVerify(source, target, sha);
+            }
+            manifest.setProperty("obb." + name, target.length() + ":" + sha);
+            imported++;
+            seen++;
+            if (progress != null) progress.update(75, "Copied and verified", name);
+        }
+        if (seen == 0) throw new IOException("No readable .obb content URI was shared");
+        writeManifest(app, pkg, manifest);
+        if (!isReadyVerified(app, pkg)) {
+            throw new IOException("Shared OBB failed SHA-256 verification");
+        }
+        if (progress != null) progress.update(100, "OBB ready", dir.getAbsolutePath());
+        return "Imported " + imported + " OBB file(s) to " + dir.getAbsolutePath();
     }
 
     public static boolean hasRegisteredDocuments(Context context, String pkg) {
@@ -639,7 +722,10 @@ public final class ObbSyncManager {
                     + targetDir.getAbsolutePath());
         }
 
-        Properties next = new Properties();
+        // Retain previously verified files imported through temporary share
+        // grants, so a later sync never loses a trusted patch/main inventory.
+        Properties next = isReadyVerified(app, pkg) ? readManifest(app, pkg)
+                : new Properties();
         int checked = 0;
         for (Map.Entry<String, List<Source>> entry : sources.entrySet()) {
             checked++;
