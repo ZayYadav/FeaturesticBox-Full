@@ -85,6 +85,16 @@ public final class ObbSyncManager {
         return new File(context.getDir("verified_obb", Context.MODE_PRIVATE), pkg + ".properties");
     }
 
+    /** Old SDKs may have left symlinks pointing at restricted host OBB files. */
+    private static boolean isSymbolicLink(File file) {
+        try {
+            android.system.Os.readlink(file.getAbsolutePath());
+            return true;
+        } catch (Exception notALink) {
+            return false;
+        }
+    }
+
     private static File destination(String pkg, String filename) {
         File target = new File(BEnvironment.getExternalObbDir(pkg), filename);
         File backup = new File(target.getParentFile(), filename + ".backup");
@@ -155,7 +165,8 @@ public final class ObbSyncManager {
                 String[] record = parseEntry(entries.getProperty(key));
                 if (!validName(name, pkg) || record == null) return false;
                 File target = destination(pkg, name);
-                if (!target.isFile() || target.length() != Long.parseLong(record[0])) return false;
+                if (!target.isFile() || isSymbolicLink(target)
+                        || target.length() != Long.parseLong(record[0])) return false;
                 count++;
             }
             return count > 0;
@@ -570,7 +581,8 @@ public final class ObbSyncManager {
                 if (hadOld) backup.renameTo(target);
                 throw new IOException("Could not activate new virtual OBB: " + source.name);
             }
-            if (target.length() != copied || !expectedSha.equals(fileHash(target))) {
+            if (isSymbolicLink(target) || target.length() != copied
+                    || !expectedSha.equals(fileHash(target))) {
                 target.delete();
                 if (hadOld) backup.renameTo(target);
                 throw new IOException("OBB verification after copy failed: " + source.name);
@@ -641,7 +653,7 @@ public final class ObbSyncManager {
                 try {
                     String expected = sourceHash(option);
                     File target = destination(pkg, name);
-                    if (!target.isFile() || target.length() <= 0
+                    if (!target.isFile() || isSymbolicLink(target) || target.length() <= 0
                             || (option.size > 0 && target.length() != option.size)
                             || !expected.equals(fileHash(target))) {
                         if (progress != null) progress.update(

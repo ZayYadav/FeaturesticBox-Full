@@ -255,7 +255,22 @@ public class LauncherActivity extends Activity {
                                 });
                                 return;
                             }
-                            FeaturesticZeroCopyLinker.linkGameObbAndMapPaks(pkg, userId);
+                            mainHandler.post(() -> animateStatus(status, "CHECKING GAME OBB"));
+                            // This runs on FeaturesticLaunch worker thread, not UI.
+                            // Uses the SDK's host-path, storage-volume, MediaStore
+                            // and previously granted document fallbacks. On failure,
+                            // do not launch a virtual game with a missing/partial OBB.
+                            com.featurestic.sdk.ObbSyncManager.sync(
+                                    LauncherActivity.this, pkg, (percent, title, detail) -> {
+                                        final int safe = Math.max(0, Math.min(100, percent));
+                                        mainHandler.post(() -> animateStatus(
+                                                status, "OBB " + safe + "%  " + title));
+                                    });
+                            if (!com.featurestic.sdk.ObbSyncManager.isReadyVerified(
+                                    LauncherActivity.this, pkg)) {
+                                throw new java.io.IOException("Virtual OBB checksum verification failed");
+                            }
+                            mainHandler.post(() -> animateStatus(status, "GAME OBB VERIFIED"));
                             isLaunchDispatched = true;
                             FeaturesticBoxCore.getBActivityManager().startActivity(launchIntent, userId);
                         } catch (Throwable throwable) {

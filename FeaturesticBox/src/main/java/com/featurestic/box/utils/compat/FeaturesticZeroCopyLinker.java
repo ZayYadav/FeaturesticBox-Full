@@ -1,61 +1,38 @@
 package com.featurestic.box.utils.compat;
 
-import android.system.Os;
+import android.content.Context;
+import android.util.Log;
 
-import com.featurestic.box.core.env.BEnvironment;
-import com.featurestic.box.utils.FileUtils;
+import com.featurestic.box.FeaturesticBoxCore;
+import com.featurestic.sdk.ObbSyncManager;
 
-import java.io.File;
+import java.io.IOException;
 
 /**
- * Fast OBB & Resource Linker that cleans partial/truncated OBB copies and never blocks startup.
+ * Compatibility entry point for older SDK callers.
+ *
+ * Former versions only created symlinks and could report success without a
+ * readable OBB. Delegate to the SDK's verified multi-source copier instead.
+ * This call performs real disk IO and MUST run on a worker thread.
  */
 public final class FeaturesticZeroCopyLinker {
+    private static final String TAG = "FeaturesticObbLinker";
 
-    private FeaturesticZeroCopyLinker() {
-    }
+    private FeaturesticZeroCopyLinker() { }
 
     public static int linkGameObbAndMapPaks(String packageName, int userId) {
-        if (packageName == null || packageName.trim().isEmpty()) {
+        Context host = FeaturesticBoxCore.getContext();
+        if (host == null || packageName == null || packageName.trim().isEmpty()) {
             return 0;
         }
-        int linkedCount = 0;
         try {
-            File targetObbDir = BEnvironment.getExternalUserAppObbDir(userId, packageName);
-            FileUtils.mkdirs(targetObbDir);
-
-            File[] sourceObbDirs = new File[]{
-                    BEnvironment.getHostExternalObbDir(packageName),
-                    new File("/sdcard/Android/obb/" + packageName),
-                    BEnvironment.getExternalUserAppObbDir(0, packageName)
-            };
-            for (File srcDir : sourceObbDirs) {
-                if (srcDir == null || !srcDir.isDirectory() || srcDir.equals(targetObbDir)) {
-                    continue;
-                }
-                File[] files = srcDir.listFiles();
-                if (files == null) continue;
-                for (File f : files) {
-                    if (f != null && f.isFile() && f.getName().endsWith(".obb") && f.length() > 10L * 1024L * 1024L) {
-                        File dst = new File(targetObbDir, f.getName());
-                        if (dst.exists() && dst.length() != f.length()) {
-                            try {
-                                dst.delete();
-                            } catch (Throwable ignored) {
-                            }
-                        }
-                        if (!dst.exists()) {
-                            try {
-                                Os.symlink(f.getAbsolutePath(), dst.getAbsolutePath());
-                                linkedCount++;
-                            } catch (Throwable ignored) {
-                            }
-                        }
-                    }
-                }
-            }
-        } catch (Throwable ignored) {
+            // BEnvironment's guest root is shared by virtual slots; the copier
+            // resolves this path and never writes into the host game's OBB folder.
+            ObbSyncManager.sync(host, packageName, null);
+            return ObbSyncManager.isReadyVerified(host, packageName) ? 1 : 0;
+        } catch (IOException | SecurityException error) {
+            Log.w(TAG, "Authorized source OBB unavailable; use a user-granted document", error);
+            return 0;
         }
-        return linkedCount;
     }
 }
